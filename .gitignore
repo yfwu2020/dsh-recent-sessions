@@ -1,0 +1,6 @@
+node_modules/
+lib/
+*.tsbuildinfo
+*.tgz
+# 原型页 + 对照截图（1.7MB 设计档，不进仓库；需要时本地留着看）
+preview/

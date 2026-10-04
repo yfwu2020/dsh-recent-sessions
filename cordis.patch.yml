@@ -1,0 +1,17 @@
+# @yfwu2020/dsh-recent-sessions bundle patch
+#
+# 官方 CLI 装配 `dsh plugin --profile <name> add @yfwu2020/dsh-recent-sessions` 时把本包加进
+# profile 的 dsh.profile.bundles，启动时合并下面的 insert 行。
+#
+# 可调参数（改 profile 的 cordis.patch.yml 里同 id 行即可覆盖）：
+#   maxItems          面板最多列多少条最近会话（默认 12，范围 3–50）
+#   showWorkspace     每行第二行是否显示所属工作区名（默认 true）
+#   defaultCollapsed  浮层初始是否收起（默认 true；用户收起状态记在 localStorage）
+#   refreshMs         相对时间文案刷新间隔毫秒（默认 30000）
+- insert:
+    - id: recent-sessions
+      name: '@yfwu2020/dsh-recent-sessions'
+      config:
+        maxItems: 12
+        showWorkspace: true
+        defaultCollapsed: true
