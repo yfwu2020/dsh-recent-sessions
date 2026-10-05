@@ -8,7 +8,7 @@
 
 ![最近会话浮层：侧栏底部的入口行展开后，会话列表浮在工作区上方](https://raw.githubusercontent.com/yfwu2020/dsh-recent-sessions/main/docs/images/floating-panel.png)
 
-> 配图是插件界面本身（样式取自插件构建产物），会话与工作区为演示数据。
+> 配图按真实界面排版渲染，样式取自插件构建产物；会话、工作区与头像为演示数据。
 
 ## 它能做什么
 
