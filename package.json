@@ -1,6 +1,6 @@
 {
   "name": "@yfwu2020/dsh-recent-sessions",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH 左侧栏「最近会话」面板：挂在工作区列表下方，按最后活动时间倒序显示最近会话，点击直达",
   "type": "module",
   "main": "./lib/index.js",
@@ -37,7 +37,8 @@
   "scripts": {
     "build": "bash scripts/build.sh",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build:client": "tsdown"
+    "build:client": "tsdown",
+    "check": "npm run build"
   },
   "exports": {
     ".": {
@@ -61,5 +62,9 @@
       ],
       "platform": "web"
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yfwu2020/dsh-recent-sessions.git"
   }
 }

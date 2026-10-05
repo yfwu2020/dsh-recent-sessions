@@ -1,0 +1,59 @@
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+  # Manual runs validate and pack only; publication requires a stable Release.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'yfwu2020/dsh-recent-sessions' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11.21.0 --ignore-scripts
+      - name: Check release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          tag="$RELEASE_TAG"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="v$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')"
+          fi
+          version="$(node scripts/check-release.mjs "$tag")"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - run: npm ci --ignore-scripts --legacy-peer-deps
+      - run: npm run check
+      - name: Pack the tested plugin
+        run: |
+          mkdir -p .local
+          npm pack --ignore-scripts --pack-destination .local
+      - name: Validate the local package without uploading
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+        # Use a separate, empty cache so an existing npm version does not block a manual rehearsal.
+        run: npm publish ".local/yfwu2020-dsh-recent-sessions-${PACKAGE_VERSION}.tgz" --dry-run --offline --cache .local/dry-run-cache --access public --ignore-scripts
+      - name: Publish through npm trusted publishing
+        if: github.event_name == 'release'
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+        run: npm publish ".local/yfwu2020-dsh-recent-sessions-${PACKAGE_VERSION}.tgz" --access public --ignore-scripts --registry https://registry.npmjs.org/

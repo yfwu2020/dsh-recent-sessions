@@ -1,6 +1,8 @@
 node_modules/
-lib/
 *.tsbuildinfo
 *.tgz
-# 原型页 + 对照截图（1.7MB 设计档，不进仓库；需要时本地留着看）
+.DS_Store
+# 原型页 + 对照截图（1.7MB 设计档，本地留着看，不进仓库）
 preview/
+# 注意：lib/ **要入库** —— 从 GitHub 装插件的人拿到的必须是可直接加载的产物
+.local/

@@ -164,6 +164,8 @@ interface FloatGeometry {
   maxHeight: number
   /** 工作区浏览区底边（视口坐标）；量不到时 = 浮层底边 */
   regionBottom: number
+  /** 工作区浏览区顶边（视口坐标）—— 算裁切线要用它当原点 */
+  regionTop: number
   /** 有没有量到工作区浏览区（决定浮层要不要自带底色，见下） */
   hasRegion: boolean
 }
@@ -191,16 +193,42 @@ const TOP_KEEP = 24
 const SIDEBAR_SEL = '[class*="_sidebarCol"]'
 /** 工作区浏览区（`sidebar.workspaces` 的容器）选择器，同上。 */
 const REGION_SEL = '[class*="_regionArea"]'
+/** 列表底部默认留白（写在 CSS 里；内容够不着一屏、或算不出来时就用它）。 */
+const LIST_PAD_BASE = 16
+/** 末行要躲开下缘那条 16px 渐隐，所以底部补白至少留这么多。 */
+const LIST_PAD_MIN = 20
 /**
- * 抠除边界抬到浮层上方多少像素（= 浮层上方那条空白带的高度）。
+ * 滑动的"速度"：每毫秒走多少像素。
  *
- * **现在设为 0**：工作区列表就在浮层上沿（`border-top` 分隔线）处切断，
- * 上方不再留任何空白。0 时同时**不做行边界吸附** —— 吸附会把边界推到
- * "跨线那一行"的上沿，等于凭空多出最多一行高的空隙，那就不是归零了。
+ * 原型里那张卡是 210px / 320ms ≈ 0.66；**时长必须按卡片高度算**，不能写死 ——
+ * 写死的话，你把浮层拖得越高，同样的时长要跑越长的距离，起步就越快、越生硬。
+ * 曲线不变（还是原型那条），变的只是单位时间走多少像素。
  */
-const REGION_GAP = 0
-/** 对齐行边界时，"一行"的高度上限（超过这个高度的元素不算行）。 */
-const ROW_MAX_HEIGHT = 48
+const SLIDE_PX_PER_MS = 0.66
+const SLIDE_MIN_MS = 260
+const SLIDE_MAX_MS = 560
+/** 滑回去比滑上来略快（慢进快出）。 */
+const SLIDE_OUT_RATIO = 0.88
+/** 滑回去播完再等这么久才卸载节点。 */
+const EXIT_SLACK_MS = 60
+const SLIDE_EASE = 'cubic-bezier(.22, 1, .36, 1)'
+/** 裁切容器比卡片上沿高出来的部分：给卡片自己的上边缘投影让位。 */
+const CLIP_HEADROOM = 24
+/** 裁切容器下沿的渐隐高度：让卡片的上边框/投影滑出时"化掉"，不会在入口线上闪一道线。 */
+const CLIP_BOTTOM_FADE = 6
+/**
+ * 收起态再多滑一点，让边框和投影彻底出界。
+ * **别调大**：卡片的行程 = 高度 + 这个值，而裁切线的行程 = 高度 —— 差多少，
+ * 动画途中工作区文字就比卡片上沿早"停"多少（中间留一条空带）。那道线本身已经由
+ * 裁切容器下沿的 6px 渐隐接管，所以这里只要 2px 余量就够。
+ */
+const SLIDE_OVERSHOOT = 2
+
+/** 按卡片高度算这一趟滑动的时长（工作区裁切线必须用同一个值）。 */
+function slideTiming(height: number): { inMs: number; outMs: number } {
+  const base = Math.min(SLIDE_MAX_MS, Math.max(SLIDE_MIN_MS, Math.round(height / SLIDE_PX_PER_MS)))
+  return { inMs: base, outMs: Math.round(base * SLIDE_OUT_RATIO) }
+}
 
 const DEFAULT_CONFIG: PanelConfig = {
   maxItems: 12,
@@ -237,7 +265,7 @@ const PANEL_CSS = `
 .dsh-rs__caret {
   flex: none;
   opacity: .55;
-  transition: rotate 160ms var(--ds-ease-in-out, ease);
+  transition: rotate 240ms var(--ds-ease-in-out, ease);
 }
 /* 收起 ›  →  展开 ⌃：浮层在入口**上方**，箭头指上去 */
 .dsh-rs__trigger[aria-expanded="true"] .dsh-rs__caret { rotate: -90deg; }
@@ -264,10 +292,28 @@ const PANEL_CSS = `
  *
  * 兜底：万一外壳改了结构、拿不到浏览区，就带上 data-surface="fill" 自带底色。
  * ──────────────────────────────────────────────────────────────── */
-.dsh-rs__float {
-  --dsh-rs-surface: var(--dsw-specific-sidebar-fill, #f7f8fa);
+/*
+ * 裁切容器：卡片从**入口那条线底下**滑出 —— 下沿正好裁在入口上沿，
+ * 上沿多留 CLIP_HEADROOM 给投影。overflow: hidden 是关键：
+ * 没有它，下滑过程中卡片会盖住入口行和「设置」。
+ */
+.dsh-rs__float-clip {
   position: fixed;
   z-index: 30;
+  overflow: hidden;
+  pointer-events: none;
+  /* 下沿渐隐 CLIP_BOTTOM_FADE：卡片的上边框/投影滑出时"化掉"，
+     不会在入口那条线上闪一道线；静止时这 6px 落在列表底部留白里，看不见 */
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - ${CLIP_BOTTOM_FADE}px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - ${CLIP_BOTTOM_FADE}px), transparent 100%);
+}
+.dsh-rs__float {
+  --dsh-rs-surface: var(--dsw-specific-sidebar-fill, #f7f8fa);
+  position: absolute;
+  top: ${CLIP_HEADROOM}px;
+  left: 0;
+  right: 0;
+  pointer-events: auto;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -300,9 +346,11 @@ const PANEL_CSS = `
     0 -1px 1px rgb(15 17 21 / .04),
     0 -2px 8px rgb(15 17 21 / .08);
   background: transparent;
-  opacity: 1;
-  transition: opacity 150ms var(--ds-ease-in-out, ease),
-              transform 180ms cubic-bezier(.2, .8, .3, 1);
+  /*
+   * 整卡上滑：卡片从"自身高度之下"滑到位（translateY(100%) → 0），
+   * 位移距离 = 自身高度，所以看着就是一张卡片被从底下推上来（不淡入）。
+   */
+  transition: transform var(--dsh-rs-slide-in, 320ms) ${SLIDE_EASE};
 }
 /* 深色下黑色阴影会被底色吃掉，加重一档 */
 [data-ds-dark-theme] .dsh-rs__float {
@@ -310,8 +358,39 @@ const PANEL_CSS = `
     0 -1px 1px rgb(0 0 0 / .25),
     0 -2px 8px rgb(0 0 0 / .3);
 }
+/*
+ * 进场：用浏览器原生的 @starting-style —— 它就是为"新插入元素从起始态开始动画"设计的，
+ * **没有时序竞态**。（之前用 rAF 做"先挂上、下一帧再滑"的两步，那个 rAF 可能赶在
+ * React 处理下一批更新之前触发，于是卡片一挂上就已经在终点位置，过渡根本不跑 ——
+ * 表现就是"展开时几乎看不到滑动、也没有速度变化"。）
+ */
 @starting-style {
-  .dsh-rs__float { opacity: 0; transform: translateY(10px); }
+  .dsh-rs__float { transform: translateY(calc(100% + ${SLIDE_OVERSHOOT}px)); }
+}
+/* 出场态 = 同样滑到自身高度之下（被裁切容器挡住） */
+.dsh-rs__float[data-leaving="true"] {
+  /* 多滑 SLIDE_OVERSHOOT：边框和投影彻底出界，否则会在裁切下沿留一道线 */
+  transform: translateY(calc(100% + ${SLIDE_OVERSHOOT}px));
+}
+.dsh-rs__float[data-leaving="true"] {
+  pointer-events: none;                                    /* 滑出过程中点不到 */
+  transition-duration: var(--dsh-rs-slide-out, 280ms);     /* 按高度算，比进来略快 */
+}
+
+/*
+ * 工作区裁切线：**和卡片同一条时长、同一条曲线**。
+ * 卡片上沿往上走多少，裁切线就跟着收多少 —— 标题是被卡片边缘"推着"逐条隐去的，
+ * 而不是"裁切固定"那样一上来就整体消失、卡片从空底里滑出来。
+ *
+ * 用 mask-size 而不是渐变色标，就是因为前者能动画。
+ */
+@keyframes dsh-rs-cut-in {
+  from { -webkit-mask-size: 100% 100%; mask-size: 100% 100%; }
+  to   { -webkit-mask-size: 100% var(--dsh-rs-cut, 100%); mask-size: 100% var(--dsh-rs-cut, 100%); }
+}
+@keyframes dsh-rs-cut-out {
+  from { -webkit-mask-size: 100% var(--dsh-rs-cut, 100%); mask-size: 100% var(--dsh-rs-cut, 100%); }
+  to   { -webkit-mask-size: 100% 100%; mask-size: 100% 100%; }
 }
 /* 兜底模式：自己带底色（macOS 上再加背景模糊，尽量贴近侧栏材质） */
 .dsh-rs__float[data-surface="fill"] { background: var(--dsh-rs-surface); }
@@ -367,6 +446,11 @@ body.dsh-rs-dragging * { cursor: ns-resize !important; }
   /*
    * 顶部不留白：那 20px 在浮层自己身上（见 .dsh-rs__float 的 padding-top）——
    * 放在这里的话它会跟着内容一起滚走。滚动区从 20px 以下才开始。
+   */
+  /*
+   * 底部补白只是**默认值**：运行时由 syncListBottomPadding() 按当前几何覆盖成
+   * "让 maxScroll 落在行边界上"的那个值（20–59px）。内容放得下、或算不出来时
+   * 就保持这个 16px。
    */
   padding: 0 8px 16px;
   display: flex;
@@ -599,6 +683,7 @@ function measure(trigger: HTMLElement | null): FloatGeometry | null {
     bottom: Math.max(0, window.innerHeight - t.top),
     maxHeight: Math.max(MIN_HEIGHT, Math.round(t.top - topLimit)),
     regionBottom: r ? r.bottom : t.top,
+    regionTop: r ? r.top : t.top,
     hasRegion: Boolean(r),
   }
 }
@@ -614,47 +699,146 @@ function measure(trigger: HTMLElement | null): FloatGeometry | null {
  * mask：**浮层盖住的那一段整个透明掉**，上沿**不羽化** —— 一条清楚的分界，
  * 由浮层顶部那条浅分隔线收口。
  */
-function maskRegion(hidePx: number): boolean {
+function setRegionCut(
+  visiblePx: number | null,
+  animate: boolean,
+  closing: boolean,
+  timing: { inMs: number; outMs: number },
+): boolean {
   const region = document.querySelector(REGION_SEL) as HTMLElement | null
   if (!region) return false
-  const hide = Math.max(0, Math.round(hidePx))
-  // 硬边：两个色标落在同一位置
-  const value = `linear-gradient(to top, transparent ${hide}px, #000 ${hide}px)`
-  region.style.maskImage = value
-  region.style.webkitMaskImage = value
-  return true
-}
-
-/**
- * 把抠除边界对齐到**行边界**：找跨过切割线的那一行（包含它的最小子元素），
- * 从这一行的**上沿**开始抠 —— 整行藏掉，不会有一行字被横着切一半。
- *
- * 找不到（切割线落在行与行之间的空隙、或结构不认识）就原样返回切割线。
- */
-function snapToRow(region: HTMLElement, cutY: number): number {
-  let found: number | null = null
-  const visit = (el: Element): boolean => {
-    for (const child of Array.from(el.children)) {
-      const r = child.getBoundingClientRect()
-      if (r.height === 0 || r.bottom <= cutY || r.top >= cutY) continue
-      if (r.height <= ROW_MAX_HEIGHT) {
-        found = r.top
-        return true
-      }
-      if (visit(child)) return true
-    }
-    return false
+  const h = region.getBoundingClientRect().height
+  const cut = visiblePx === null ? h : Math.max(0, Math.min(h, Math.round(visiblePx)))
+  // 关键帧里要用到这个名字（dsh-rs-cut-in/out 的 to 值）
+  region.style.setProperty('--dsh-rs-cut', `${cut}px`)
+  region.style.maskImage = 'linear-gradient(#000, #000)'
+  region.style.webkitMaskImage = 'linear-gradient(#000, #000)'
+  region.style.maskRepeat = 'no-repeat'
+  region.style.webkitMaskRepeat = 'no-repeat'
+  region.style.maskPosition = 'top'
+  region.style.webkitMaskPosition = 'top'
+  if (!animate) {
+    region.style.animation = ''
+    region.style.maskSize = `100% ${cut}px`
+    region.style.webkitMaskSize = `100% ${cut}px`
+    return true
   }
-  visit(region)
-  return found ?? cutY
+  region.style.maskSize = ''
+  region.style.webkitMaskSize = ''
+  // 和卡片**同一个时长同一个曲线** —— 差一点卡片边缘就会和工作区文字错开
+  region.style.animation = closing
+    ? `dsh-rs-cut-out ${timing.outMs}ms ${SLIDE_EASE} both`
+    : `dsh-rs-cut-in ${timing.inMs}ms ${SLIDE_EASE} both`
+  return true
 }
 
 function unmaskRegion(): void {
   const region = document.querySelector(REGION_SEL) as HTMLElement | null
   if (!region) return
+  region.style.animation = ''
   region.style.maskImage = ''
   region.style.webkitMaskImage = ''
+  region.style.maskRepeat = ''
+  region.style.webkitMaskRepeat = ''
+  region.style.maskPosition = ''
+  region.style.webkitMaskPosition = ''
+  region.style.maskSize = ''
+  region.style.webkitMaskSize = ''
+  region.style.removeProperty('--dsh-rs-cut')
 }
+
+/**
+ * 找"离当前滚动位置最近的行上沿"（内容坐标）。
+ *
+ * 用每行实测位置算，不假设行高等距 —— 以后行高改了、或加了行间距，
+ * 这里也不会算错。
+ */
+function nearestRowTop(list: HTMLElement, maxScroll: number): number | null {
+  const rows = list.querySelectorAll<HTMLElement>('.dsh-rs__row')
+  if (rows.length === 0) return null
+  const listTop = list.getBoundingClientRect().top
+  const scrollTop = list.scrollTop
+  let best: number | null = null
+  let bestDistance = Infinity
+  for (const row of Array.from(rows)) {
+    const top = row.getBoundingClientRect().top - listTop + scrollTop
+    // 够不着的行边界直接跳过：超过 maxScroll 的位置浏览器根本滚不到，
+    // 硬选它只会被夹回 maxScroll，等于没对齐
+    if (top > maxScroll + 0.5) continue
+    const distance = Math.abs(top - scrollTop)
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = top
+    }
+  }
+  return best
+}
+
+/**
+ * 松手后把列表修正到整行边界（A′ 方案）。
+ *
+ * 只在滚动**停下来**的那一刻动手，滚动过程完全交给浏览器原生惯性 ——
+ * 所以没有 CSS `scroll-snap-type: mandatory` 那种"咔哒"感。
+ * 效果：列表顶部永远是**完整一行**，不会出现"上一行被切掉大半个、
+ * 标题只剩半截"。
+ *
+ * 进来先按当前几何对一次底部补白：`maxScroll` 落在行边界上，最底部才有的可落。
+ * 两个例外都不做无意义的动画：
+ *   · 已经对齐（差 ≤ 0.5px）→ 直接返回
+ *   · 行边界够不着（`top > maxScroll`）→ `nearestRowTop` 里就筛掉了
+ */
+function settleListToRow(list: HTMLElement | null): void {
+  if (!list) return
+  syncListBottomPadding(list)
+  const max = Math.max(0, list.scrollHeight - list.clientHeight)
+  const target = nearestRowTop(list, max)
+  if (target === null) return
+  const clamped = Math.min(Math.max(0, target), max)
+  if (Math.abs(list.scrollTop - clamped) <= 0.5) return
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true
+  list.scrollTo({ top: clamped, behavior: reduceMotion ? 'auto' : 'smooth' })
+}
+
+/**
+ * 按几何算一次底部补白：让 `maxScroll = 行合计 + pad − 视口高` 正好是**行距的整数倍**。
+ *
+ * 为什么不能固定一个值：`pad ≡ 视口高 − 行合计 (mod 行距)`，而视口高随你拖动、
+ * 行合计随条目数变 —— 固定值只在某些高度下成立。
+ *
+ * 为什么**不放在滚动里算**：`pad` 只跟"视口高"和"行合计"有关，这两个只在
+ * 拖动结束 / 条目变化 / 浮层展开时变，滚动一百次也不会变。
+ *
+ * 取"最小可行值"而不是固定两行：`need` 落在 [0, 行距)，够 20px 就用它，
+ * 不够才加一个行距（为了躲开下缘那条渐隐）→ 滚到底时末尾空白 20–59px，
+ * 比恒定 80px 紧。内容本来就放得下时**不加**补白，短列表末尾不会凭空多一块。
+ */
+function syncListBottomPadding(list: HTMLElement | null): void {
+  if (!list) return
+  const rows = Array.from(list.querySelectorAll<HTMLElement>('.dsh-rs__row'))
+  if (rows.length < 2) {
+    list.style.paddingBottom = ''
+    return
+  }
+  const first = rows[0].getBoundingClientRect()
+  const second = rows[1].getBoundingClientRect()
+  const last = rows[rows.length - 1].getBoundingClientRect()
+  const pitch = second.top - first.top
+  const rowsHeight = last.bottom - first.top
+  const viewport = list.clientHeight
+  if (!(pitch > 1) || viewport <= 0) {
+    list.style.paddingBottom = ''
+    return
+  }
+  // 内容本来就放得下：保持 CSS 里的默认留白，不额外加
+  if (rowsHeight + LIST_PAD_BASE <= viewport) {
+    list.style.paddingBottom = ''
+    return
+  }
+  const need = (((viewport - rowsHeight) % pitch) + pitch) % pitch
+  const pad = need >= LIST_PAD_MIN ? need : need + pitch
+  list.style.paddingBottom = `${Math.round(pad)}px`
+}
+
 
 /**
  * 打开一个会话。
@@ -828,10 +1012,17 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
     const [height, setHeight] = React.useState<number | null>(() => readHeight())
     const [geo, setGeo] = React.useState<FloatGeometry | null>(null)
     const [dragging, setDragging] = React.useState(false)
-    /** none = 浮层不画底色（背后列表已被抠掉）；fill = 拿不到浏览区时的兜底 */
-    const [surface, setSurface] = React.useState<'none' | 'fill'>('none')
+    /** 浮层节点是否留在 DOM 里（退场动画期间仍为 true，播完才卸载） */
+    const [mounted, setMounted] = React.useState(false)
+    /** 正在播退场（滑回去） */
+    const [leaving, setLeaving] = React.useState(false)
+    /** 上一帧的"卡片是否已出现 / 是否在收回" —— 用来识别状态翻转的那一瞬间 */
+    const cutPhaseRef = React.useRef({ shown: false, leaving: false })
+    /** 当前高度给动画编排 effect 读（放依赖会让它每次改高度都重跑） */
+    const liveHeightRef = React.useRef(0)
     const triggerRef = React.useRef<HTMLButtonElement | null>(null)
     const floatRef = React.useRef<HTMLDivElement | null>(null)
+    const listRef = React.useRef<HTMLDivElement | null>(null)
     const dragRef = React.useRef<{ startY: number; startHeight: number; max: number } | null>(null)
 
     // 轨道态（wide === false）：**什么都不留**
@@ -877,12 +1068,75 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
       return () => document.removeEventListener('keydown', onKey)
     }, [narrow, collapsed])
 
+    /**
+     * 展开 / 收回的动画编排（A · 整卡上滑）。
+     *
+     * 展开：卡片挂上时由 `@starting-style` 给它"自身高度之下"的起始态 → 滑上来；
+     * 同一帧里工作区裁切线从"不抠"收拢到卡片上沿。
+     * 两条动画落在同一帧、用同一对时长/曲线，所以卡片边缘永远压在裁切线上。
+     *
+     * 收回：打 `data-leaving` 让它滑回去（裁切线同步放回），播完再摘节点 ——
+     * 否则 React 一卸载，节点当场消失，收回就没有动画了。
+     *
+     * 快速连点：cleanup 会清掉 rAF / 定时器，不会"展开到一半被卸载"。
+     */
+    React.useEffect(() => {
+      if (narrow) return
+      if (!collapsed) {
+        setLeaving(false)
+        setMounted(true)
+        return
+      }
+      if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true) {
+        // 系统关了动效：没有过渡可等，直接摘
+        setMounted(false)
+        return
+      }
+      setLeaving(true)
+      // 卸载等待按"这一趟的实际时长"算：高度不同时长不同（读 ref，避免把
+      // currentHeight 放进依赖 —— 那会让 effect 每次改高度都重跑、动画重播）
+      const { outMs } = slideTiming(liveHeightRef.current)
+      const timer = window.setTimeout(() => {
+        setMounted(false)
+        setLeaving(false)
+      }, outMs + EXIT_SLACK_MS)
+      return () => window.clearTimeout(timer)
+    }, [collapsed, narrow])
+
     // 拖动中给 body 打标记：整页禁选中、光标不抖
     React.useEffect(() => {
       if (!dragging) return
       document.body.classList.add('dsh-rs-dragging')
       return () => document.body.classList.remove('dsh-rs-dragging')
     }, [dragging])
+
+    /**
+     * A′：松手后把列表修正到整行边界。
+     *
+     * 优先用 `scrollend`（Chromium 114+ 原生支持，正是"惯性停下"那一刻）；
+     * 没有就退化成"最后一次 scroll 之后 120ms" —— 效果一样，只是判定稍粗。
+     * 我们自己的平滑修正会再触发一轮事件，但那时已经对齐，`settleListToRow`
+     * 直接返回，不会来回拉锯。
+     */
+    React.useEffect(() => {
+      if (narrow || collapsed) return
+      const list = listRef.current
+      if (!list) return
+      const settle = () => settleListToRow(list)
+      const supportsScrollEnd = 'onscrollend' in window
+      let timer = 0
+      const onScroll = () => {
+        window.clearTimeout(timer)
+        timer = window.setTimeout(settle, 120)
+      }
+      if (supportsScrollEnd) list.addEventListener('scrollend', settle)
+      else list.addEventListener('scroll', onScroll, { passive: true })
+      return () => {
+        window.clearTimeout(timer)
+        if (supportsScrollEnd) list.removeEventListener('scrollend', settle)
+        else list.removeEventListener('scroll', onScroll)
+      }
+    }, [narrow, collapsed, items.length])
 
     // 调试抓手：控制台 __dshRecentSessions 能立刻看出入口是否挂上、列了几行、
     // 每行是什么状态（黄点/绿点/转圈），排"点没出来"时一眼定位
@@ -904,6 +1158,10 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
     }, [narrow, items.length, collapsed, height, geo, uiSessionReady, items])
 
     const currentHeight = Math.min(height ?? DEFAULT_HEIGHT, geo?.maxHeight ?? DEFAULT_HEIGHT)
+    /** 这一趟滑动的时长（按高度算）—— 卡片过渡、裁切 keyframes、卸载等待共用同一个值 */
+    const timing = slideTiming(currentHeight)
+    // 给动画编排 effect 读；直接在渲染里写，避免把 currentHeight 塞进它的依赖
+    liveHeightRef.current = currentHeight
 
     /**
      * 把浮层背后的工作区列表"抠掉"。
@@ -918,22 +1176,62 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
      * 用 layout effect：必须在浏览器绘制之前挂上 mask，否则展开的第一帧会是
      * "浮层已经透明、列表还没抠掉" —— 两层文字叠在一起闪一下。
      */
+    /**
+     * 底部补白：**只在几何变化时算**（拖动结束、条目数变化、展开、窗口缩放），
+     * 拖动过程中不插手 —— 免得每帧都读 rect、也免得拖到一半末尾空白跟着抖。
+     */
     React.useLayoutEffect(() => {
-      if (narrow || collapsed || !geo) {
+      if (narrow || collapsed || dragging) return
+      syncListBottomPadding(listRef.current)
+    }, [narrow, collapsed, dragging, items.length, currentHeight])
+
+    /*
+     * 工作区裁切线：**跟着卡片上沿走**（和卡片同一对时长/曲线的 keyframes）。
+     *
+     *   · 刚挂上那一帧 → 先完全不抠（下一帧才和卡片一起动）
+     *   · 展开中 / 已展开 → 裁到卡片最终上沿
+     *   · 收回中 → 放回 100%，和卡片下滑同步
+     *   · 拖动改高度 → 直接就位，不重播动画（否则拉着拉着裁切线一直重新跑）
+     */
+    React.useLayoutEffect(() => {
+      const prev = cutPhaseRef.current
+      // 卡片第一次出现那一帧 = 展开动画的起点（和卡片的 @starting-style 同一次样式计算）
+      const shown = mounted && geo !== null
+      const justShown = shown && !prev.shown
+      const closed = !prev.leaving && leaving     // 刚打上 leaving = 收回动画的起点
+      cutPhaseRef.current = { shown, leaving }
+
+      if (narrow || !mounted || !geo || !geo.hasRegion) {
         unmaskRegion()
         return
       }
-      const floatTop = window.innerHeight - geo.bottom - currentHeight
-      // 切割线 = 浮层上沿往上 REGION_GAP（现在 0 = 就在分隔线上切）。
-      // GAP > 0 时才吸附到行边界（避免半行字）；GAP = 0 要的就是"严丝合缝"，
-      // 吸附反而会凭空多出最多一行高的空隙。
-      const cutY = floatTop - REGION_GAP
-      const region = REGION_GAP > 0 ? (document.querySelector(REGION_SEL) as HTMLElement | null) : null
-      const snapped = region ? snapToRow(region, cutY) : cutY
-      const ok = maskRegion(geo.regionBottom - snapped)
-      setSurface(ok ? 'none' : 'fill')
-      return unmaskRegion
-    }, [narrow, collapsed, geo, currentHeight])
+      const cardTop = window.innerHeight - geo.bottom - currentHeight
+      const visible = cardTop - geo.regionTop
+      const timing = slideTiming(currentHeight)
+      if (justShown) {
+        setRegionCut(visible, true, false, timing)
+        return
+      }
+      if (closed) {
+        /*
+         * 收回的起点必须是**当前展开态的裁切值**（visible），不能传 null。
+         * 传 null 会把 --dsh-rs-cut 写成"整个浏览区高度"，于是 dsh-rs-cut-out
+         * 的 from 和 to 完全一样 → 全程不抠 → 工作区内容整段露着，
+         * 而浮层是不画底色的透明卡片，滑下来就和工作区的行/图标叠在一起。
+         */
+        setRegionCut(visible, true, true, timing)
+        return
+      }
+      if (leaving) return                          // 收回动画进行中：别去动它
+      if (collapsed) {
+        // 已经收起（例如系统关了动效、没有动画可等）：直接就位
+        setRegionCut(null, false, false, timing)
+        return
+      }
+      // 其余情况（拖动改高度、几何重算…）：直接就位，**不重播动画** ——
+      // 重播会先跳回"不抠"再收拢，工作区标题会闪一下。
+      setRegionCut(visible, false, false, timing)
+    }, [narrow, mounted, leaving, collapsed, dragging, geo, currentHeight])
 
     /** 落高度：夹在 [下限, 本次上限] 内并持久化。 */
     const applyHeight = (next: number, max: number): void => {
@@ -1026,6 +1324,7 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
         {
           className: 'dsh-rs__list',
           role: 'list',
+          ref: listRef,
         },
         items.map((row) =>
           h(
@@ -1052,25 +1351,36 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
         ),
       )
 
-    // 浮层：portal 到 body + fixed，坐标从侧栏列量出来（不被侧栏 overflow 裁掉）
-    const float = collapsed || !geo
+    // 浮层：portal 到 body —— 外层 .dsh-rs__float-clip 负责坐标与裁切，
+    // 内层 .dsh-rs__float 只负责"整卡上滑"（translateY(100%) → 0）。
+    const float = !mounted || !geo
       ? null
       : createPortal(
         h(
           'div',
           {
-            id: 'dsh-rs-float',
-            ref: floatRef,
-            className: 'dsh-rs__float',
-            'data-surface': surface,
-            role: 'region',
-            'aria-label': '最近会话',
+            className: 'dsh-rs__float-clip',
             style: {
               left: `${Math.round(geo.left)}px`,
               width: `${Math.round(geo.width)}px`,
               bottom: `${Math.round(geo.bottom)}px`,
-              height: `${Math.round(currentHeight)}px`,
-            },
+              height: `${Math.round(currentHeight + CLIP_HEADROOM)}px`,
+              // 卡片过渡与工作区裁切线共用这两个值 —— 必须是**同一个**时长
+              '--dsh-rs-slide-in': `${timing.inMs}ms`,
+              '--dsh-rs-slide-out': `${timing.outMs}ms`,
+            } as React.CSSProperties,
+          },
+          h(
+          'div',
+          {
+            id: 'dsh-rs-float',
+            ref: floatRef,
+            className: 'dsh-rs__float',
+            'data-surface': geo.hasRegion ? 'none' : 'fill',
+            'data-leaving': leaving ? 'true' : 'false',
+            role: 'region',
+            'aria-label': '最近会话',
+            style: { height: `${Math.round(currentHeight)}px` },
           },
           h('div', {
             className: 'dsh-rs__grip',
@@ -1088,7 +1398,8 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
             onDoubleClick: onGripReset,
             onKeyDown: onGripKey,
           }),
-          body,
+            body,
+          ),
         ),
         document.body,
       )
