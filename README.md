@@ -82,6 +82,8 @@ bash scripts/build.sh   # host tsc → lib/ + client tsdown → lib/client.js
 改动客户端代码后需要刷新一次 Harness 窗口才会加载新的 `lib/client.js`。
 仓库里提交了构建产物，所以从 GitHub 安装的用户不需要自己编译。
 
+实现思路、踩过的坑和排错线索记在 [开发记录](docs/development.md)。
+
 ## 更新记录
 
 ### 0.2.0
