@@ -1138,25 +1138,6 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
       }
     }, [narrow, collapsed, items.length])
 
-    // 调试抓手：控制台 __dshRecentSessions 能立刻看出入口是否挂上、列了几行、
-    // 每行是什么状态（黄点/绿点/转圈），排"点没出来"时一眼定位
-    React.useEffect(() => {
-      const handle = (window as unknown as Record<string, unknown>).__dshRecentSessions as
-        | Record<string, unknown>
-        | undefined
-      const next = {
-        mounted: !narrow,
-        rows: items.length,
-        collapsed: narrow ? true : collapsed,
-        height: height ?? DEFAULT_HEIGHT,
-        geometry: geo,
-        statusSource: uiSessionReady,
-        states: items.map((row) => `${row.state}:${row.stateLabel}`),
-      }
-      if (handle) Object.assign(handle, next)
-      else (window as unknown as Record<string, unknown>).__dshRecentSessions = next
-    }, [narrow, items.length, collapsed, height, geo, uiSessionReady, items])
-
     const currentHeight = Math.min(height ?? DEFAULT_HEIGHT, geo?.maxHeight ?? DEFAULT_HEIGHT)
     /** 这一趟滑动的时长（按高度算）—— 卡片过渡、裁切 keyframes、卸载等待共用同一个值 */
     const timing = slideTiming(currentHeight)
