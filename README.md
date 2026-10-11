@@ -86,6 +86,12 @@ bash scripts/build.sh   # host tsc → lib/ + client tsdown → lib/client.js
 
 ## 更新记录
 
+### 0.2.1
+
+- 文档与市场配图整理：README 改为面向使用者，实现记录移到 [开发记录](docs/development.md)。
+- 在仓库里声明 `screenshots.json`，插件市场的详情页使用这张配图。
+- 去掉控制台里那个调试抓手（`window.__dshRecentSessions`），功能不变。
+
 ### 0.2.0
 
 - 侧栏底部的入口行改成浮层：卡片浮在工作区上方，不再从工作区借高度。
