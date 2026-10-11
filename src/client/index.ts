@@ -301,7 +301,8 @@ const PANEL_CSS = `
  */
 .dsh-rs__float-clip {
   position: fixed;
-  z-index: 30;
+  /* Sidebar utility stays below the host overlay (20) and explanation root (70). */
+  z-index: 19;
   overflow: hidden;
   pointer-events: none;
   /* 下沿渐隐 CLIP_BOTTOM_FADE：卡片的上边框/投影滑出时"化掉"，
