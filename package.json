@@ -1,6 +1,6 @@
 {
   "name": "@yfwu2020/dsh-recent-sessions",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "DSH 左侧栏「最近会话」面板：挂在工作区列表下方，按最后活动时间倒序显示最近会话，点击直达",
   "type": "module",
   "main": "./lib/index.js",
