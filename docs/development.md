@@ -118,8 +118,8 @@
 状态对读屏是有语义的，所以每个状态都配了一段 visually-hidden 文案（`运行中` / `等待回答` /
 `等待批准` / `等待计划确认` / `已完成`），做法与官方 `SessionStatusDots` 一致 —— 状态不只做成一个颜色。
 
-排查用：控制台 `__dshRecentSessions.states` 直接列出当前每行的 `状态:文案`，
-`__dshRecentSessions.statusSource` 说明状态源有没有拿到。
+（0.2.x 曾在控制台挂过 `__dshRecentSessions` 调试抓手，后来移除了；现在状态直接看
+侧栏行前的点和 `uiSession.sessionStatus` 快照即可。）
 
 ## 为什么"看不出来是浮层"
 
