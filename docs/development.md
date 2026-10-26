@@ -8,6 +8,32 @@
 
 ---
 
+## 0.3.0 · 行操作与已归档抽屉
+
+- **行操作**：行从 `<button>` 拆成「容器 + 整行跳转按钮 + 操作组」。操作组默认
+  `display:none`，靠 `:hover` / `:focus-within` / `[data-menu]` 出现；**占位出现**
+  （不是浮在上面盖字），和工作区会话行的 16px 图标 / 10px 间距；右侧多留 4px。
+  `Tab` 先到整行按钮，`:focus-within` 让操作出现，再 `Tab` 就能到三枚操作。
+- **菜单 / 弹窗**：都是 `createPortal(document.body)`。菜单打开时先渲染在
+  `visibility:hidden`，`useLayoutEffect` 量出宽高后再定位（右对齐触发按钮，
+  下方放不下就翻到上方，左右夹在视口内），最后才 `data-ready="true"`。
+  这样不会被浮层的 `overflow:hidden` 裁掉。
+- **服务**：归档 / 置顶 / 取消置顶 / 取消归档走 `ctx.get('workspaces')` 的
+  `archiveSession(id,{stopActivity})`、`pinSession(id)` 等方法；重命名 / 分叉走
+  `ctx.get('sessions').rename(id,title)` / `.fork({sessionId,increaseTitle:true})`。
+  归档运行中的会话时，宿主抛 `workspace/session-active`（错误上的 `rpcError.code`）
+  → 换成「停止并归档」确认，再带 `stopActivity:true` 重试。
+- **移除**：只写 `localStorage['dsh.recent-sessions.removed.v1']`（id 数组），
+  渲染时过滤；撤销即从集合里删掉。
+- **已归档抽屉**：绝对定位 + 一层 `overflow:hidden` 的裁切容器（`bottom:0`），
+  从 `translateY(101%)` 滑上来；**覆盖**在列表上，不改变列表高度，所以回弹距离
+  和它无关。列表行包了一层 `.dsh-rs__rows`，橡皮筋拉的是它的 `translateY`。
+  滚轮在 `{passive:false}` 里 `preventDefault`，到底后按
+  `pull += deltaY * 0.36 * (0.42 + 0.58 * room)` 渐进阻尼，`PULL_MAX=72` 拉满
+  才弹抽屉；停 220ms 没拉满回弹。抽屉露出后滚轮只重置 4.5s 计时器，不收回。
+- **易错点**：浮层是开门后才挂上的，滚轮 / scrollend 监听要依赖 `mounted`，
+  否则 effect 在列表还没渲染时取到 null、之后不再重跑（表现：滚到底上推没反应）。
+
 ## 0.2.0 时期的实现笔记
 
 侧栏底部的**一行入口 + 一个浮层**：入口长在**工作区列表下方、设置上方**（官方
