@@ -203,6 +203,10 @@ const COLLAPSE_KEY = 'dsh.recent-sessions.collapsed.v2'
 const HEIGHT_KEY = 'dsh.recent-sessions.height.v2'
 /** 「从最近会话移除」的本地集合：只影响这个列表，不动会话本身。 */
 const REMOVED_KEY = 'dsh.recent-sessions.removed.v1'
+/** 已经从磁盘删掉的会话 id：宿主重扫前先本地过滤，避免幽灵行。 */
+const DELETED_KEY = 'dsh.recent-sessions.deleted.v1'
+const SESSION_INSPECT_URL = '/dsh-recent-sessions/api/sessions/inspect'
+const SESSION_DELETE_URL = '/dsh-recent-sessions/api/sessions/delete'
 /** 橡皮筋最多拉这么长；拉满 = 「已归档」抽屉弹出。 */
 const PULL_MAX = 72
 /** 抽屉露出后，无操作多久自动缩回。 */
@@ -270,6 +274,7 @@ const PANEL_CSS = `
   align-items: center;
   gap: 7px;
   width: 100%;
+  box-sizing: border-box;
   height: 30px;
   padding: 0 8px;
   border: 0;
@@ -291,12 +296,10 @@ const PANEL_CSS = `
 .dsh-rs__caret {
   flex: none;
   opacity: .55;
-  transition: rotate 240ms var(--ds-ease-in-out, ease);
+  transition: rotate 720ms var(--ds-ease-in-out, ease);
 }
 /* 收起 ›  →  展开 ⌃：浮层在入口**上方**，箭头指上去 */
 .dsh-rs__trigger[aria-expanded="true"] .dsh-rs__caret { rotate: -90deg; }
-/* 归档视图：入口行原地变成「返回 + 已归档 N」，箭头指左 */
-.dsh-rs__trigger[aria-expanded="true"][data-mode="archive"] .dsh-rs__caret { rotate: 180deg; }
 .dsh-rs__label {
   flex: 1 1 auto;
   min-width: 0;
@@ -305,11 +308,194 @@ const PANEL_CSS = `
   white-space: nowrap;
 }
 .dsh-rs__count {
+  position: relative;
   flex: none;
+  width: 18px;
+  height: 16px;
+}
+.dsh-rs__num {
+  position: absolute;
+  right: 0;
+  top: 0;
   font-size: 11px;
   font-weight: 600;
   color: var(--dsw-alias-label-tertiary, inherit);
   font-variant-numeric: tabular-nums;
+  transition: opacity 480ms ease;
+}
+
+/* ── 归档标题行（入口位）：普通 / 搜索 / 选择，按工作区搜索的展开方式 ──
+ * 搜索/选择都是同一行里的宽度动画：标签收起、动作区展开，360ms；
+ * 搜索态变成带描边的行内输入框，选择态把选择按钮撑成三枚动作。
+ */
+.dsh-rs__titlebar {
+  width: 100%;
+  box-sizing: border-box;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+.dsh-rs__tback {
+  position: relative;
+  flex: none;
+  width: 11px;
+  height: 22px;
+  margin-right: 7px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #888);
+  cursor: pointer;
+}
+.dsh-rs__tback::after { content: ""; position: absolute; inset: -4px -6px; }
+.dsh-rs__tback svg { width: 11px; height: 11px; }
+.dsh-rs__tback:hover { color: var(--dsw-alias-label-secondary, #555); }
+.dsh-rs__tlabels {
+  position: relative;
+  flex: none;
+  /* 双标签是绝对定位交叉淡换的，容器宽度必须给定值；用 flex 分摊会在收回时抖动 */
+  width: 64px;
+  height: 16px;
+  margin-right: 7px;
+  overflow: hidden;
+  transition:
+    width 360ms var(--ds-ease-in-out, ease),
+    opacity 240ms var(--ds-ease-in-out, ease),
+    margin-right 360ms var(--ds-ease-in-out, ease);
+}
+.dsh-rs__titlebar[data-mode="search"] .dsh-rs__tlabels {
+  width: 0;
+  opacity: 0;
+  margin-right: 0;
+}
+.dsh-rs__tlabel {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+  transition: opacity 240ms var(--ds-ease-in-out, ease);
+}
+.dsh-rs__tlabel--select { opacity: 0; }
+.dsh-rs__titlebar[data-mode="select"] .dsh-rs__tlabel--normal { opacity: 0; }
+.dsh-rs__titlebar[data-mode="select"] .dsh-rs__tlabel--select { opacity: 1; }
+.dsh-rs__tlabel b {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-variant-numeric: tabular-nums;
+}
+.dsh-rs__tact {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+.dsh-rs__tsearch {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 22px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  border-radius: 7px;
+  overflow: hidden;
+  transition:
+    max-width 360ms var(--ds-ease-in-out, ease),
+    opacity 240ms var(--ds-ease-in-out, ease),
+    box-shadow 240ms var(--ds-ease-in-out, ease);
+}
+.dsh-rs__titlebar[data-mode="search"] .dsh-rs__tsearch {
+  max-width: 100%;
+  box-shadow: inset 0 0 0 .5px var(--dsw-alias-border-l4, rgb(0 0 0 / .16));
+}
+.dsh-rs__titlebar[data-mode="select"] .dsh-rs__tsearch {
+  max-width: 0;
+  opacity: 0;
+}
+.dsh-rs__tsearch .dsh-rs__tbtn { flex: none; }
+.dsh-rs__tinput {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 0;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 400;
+  outline: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms var(--ds-ease-in-out, ease);
+}
+.dsh-rs__titlebar[data-mode="search"] .dsh-rs__tinput {
+  opacity: 1;
+  pointer-events: auto;
+}
+.dsh-rs__tinput::placeholder { color: var(--dsw-alias-label-tertiary, #888); }
+.dsh-rs__tclear {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms var(--ds-ease-in-out, ease);
+}
+.dsh-rs__titlebar[data-mode="search"] .dsh-rs__tclear {
+  opacity: 1;
+  pointer-events: auto;
+}
+.dsh-rs__tselect {
+  flex: none;
+  max-width: 22px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow: hidden;
+  transition:
+    max-width 360ms var(--ds-ease-in-out, ease),
+    opacity 240ms var(--ds-ease-in-out, ease);
+}
+.dsh-rs__titlebar[data-mode="select"] .dsh-rs__tselect { max-width: 94px; }
+.dsh-rs__titlebar[data-mode="search"] .dsh-rs__tselect { max-width: 0; opacity: 0; }
+.dsh-rs__tbtn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #888);
+  cursor: pointer;
+  flex: none;
+}
+.dsh-rs__tbtn svg { width: 14px; height: 14px; }
+.dsh-rs__tbtn:hover { background: var(--dsw-alias-interactive-bg-hover, rgb(0 0 0 / .06)); color: var(--dsw-alias-label-secondary, #555); }
+.dsh-rs__tbtn:disabled { opacity: .35; cursor: default; }
+.dsh-rs__tbtn:disabled:hover { background: transparent; color: var(--dsw-alias-label-tertiary, #888); }
+.dsh-rs__tbtn:focus-visible,
+.dsh-rs__tback:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, currentColor);
+  outline-offset: 1px;
+}
+.dsh-rs__tbtn--danger { color: var(--dsw-alias-state-error-primary, #d24a3a); }
+.dsh-rs__tbtn--danger:hover {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d24a3a) 10%, transparent);
+  color: var(--dsw-alias-state-error-primary, #d24a3a);
 }
 
 /* ── 浮层本体 ──────────────────────────────────────────────────────
@@ -467,6 +653,30 @@ body.dsh-rs-dragging,
 body.dsh-rs-dragging * { cursor: ns-resize !important; }
 
 /* 列表：**不画滚动条**（仍然能滚），只用下缘一条渐隐提示"下面还有" */
+/* ── 两个视图（最近会话 / 已归档）──────────────────────────────
+ * 并排各占满宽，切换时整页横移（push）：recent 0 → -100%，archive 100% → 0。
+ * 两页互不重叠，所以透明底（vibrancy）下也不会互相透字。
+ */
+.dsh-rs__views {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+.dsh-rs__view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* 慢放 3×：页面横移 960ms，底部标题 480ms，箭头 720ms */
+  transition: transform 960ms cubic-bezier(.32, .72, 0, 1);
+  will-change: transform;
+}
+.dsh-rs__view--archive { transform: translateX(100%); }
+.dsh-rs__views[data-view="archive"] .dsh-rs__view--recent { transform: translateX(-100%); }
+.dsh-rs__views[data-view="archive"] .dsh-rs__view--archive { transform: none; }
+
 .dsh-rs__list {
   position: relative;
   flex: 1 1 auto;
@@ -890,6 +1100,16 @@ body.dsh-rs-dragging * { cursor: ns-resize !important; }
   font-family: var(--dsw-font-family, inherit);
 }
 .dsh-rs__modal-scrim { position: absolute; inset: 0; background: var(--dsw-alias-bg-mask-1, rgb(0 0 0 / .24)); }
+.dsh-rs__modal-card--delete { width: min(360px, calc(100vw - 48px)); }
+.dsh-rs__modal-desc { margin: 0; font-size: 11.5px; line-height: 1.55; color: var(--dsw-alias-label-secondary, #555); }
+.dsh-rs__delete-list { max-height: 220px; overflow: auto; display: flex; flex-direction: column; gap: 2px; padding: 4px 0; }
+.dsh-rs__delete-item { display: flex; align-items: baseline; gap: 12px; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-primary, #111); }
+.dsh-rs__delete-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-rs__delete-size { flex: none; font-size: 11px; color: var(--dsw-alias-label-tertiary, #888); font-variant-numeric: tabular-nums; }
+.dsh-rs__delete-total { padding-top: 8px; border-top: 1px solid var(--dsw-alias-border-l2, rgb(0 0 0 / .1)); font-size: 11.5px; color: var(--dsw-alias-label-secondary, #555); text-align: right; }
+.dsh-rs__btn--danger { background: var(--dsw-alias-state-error-primary, #d24a3a); color: #fff; }
+.dsh-rs__btn--danger:hover { filter: brightness(.95); }
+.dsh-rs__btn--danger:disabled { opacity: .5; cursor: default; }
 .dsh-rs__modal-card {
   position: relative;
   width: min(320px, calc(100vw - 48px));
@@ -943,23 +1163,66 @@ body.dsh-rs-dragging * { cursor: ns-resize !important; }
 .dsh-rs__back svg { width: 14px; height: 14px; }
 .dsh-rs__head-title { font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-secondary, #555); }
 .dsh-rs__head-count { font-size: 11px; color: var(--dsw-alias-label-tertiary, #888); font-variant-numeric: tabular-nums; }
-.dsh-rs__restore {
+.dsh-rs__row-actions {
   flex: none;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms var(--ds-ease-in-out, ease);
+}
+.dsh-rs__row:hover .dsh-rs__row-actions,
+.dsh-rs__row:focus-within .dsh-rs__row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .dsh-rs__row-actions { opacity: 1; pointer-events: auto; }
+}
+.dsh-rs__row-act {
+  width: 22px;
   height: 22px;
-  padding: 0 7px 0 6px;
+  padding: 0;
+  display: grid;
+  place-items: center;
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--dsw-alias-label-secondary, #555);
-  font: inherit;
-  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #888);
   cursor: pointer;
 }
-.dsh-rs__restore svg { width: 12px; height: 12px; color: var(--dsw-alias-label-tertiary, #888); }
-.dsh-rs__restore:hover { background: var(--dsw-alias-interactive-bg-active, rgb(0 0 0 / .07)); color: var(--dsw-alias-label-primary, #111); }
+.dsh-rs__row-act svg { width: 14px; height: 14px; }
+.dsh-rs__row-act:hover {
+  background: var(--dsw-alias-interactive-bg-active, rgb(0 0 0 / .07));
+  color: var(--dsw-alias-label-primary, #111);
+}
+.dsh-rs__row-act--danger { color: var(--dsw-alias-state-error-primary, #d24a3a); }
+.dsh-rs__row-act--danger:hover {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d24a3a) 10%, transparent);
+  color: var(--dsw-alias-state-error-primary, #d24a3a);
+}
+
+.dsh-rs__row[data-selecting="true"] { cursor: pointer; }
+.dsh-rs__row[data-selected="true"] {
+  background: color-mix(in srgb, var(--dsw-alias-interactive-bg-active, rgb(0 0 0 / .07)) 70%, transparent);
+}
+.dsh-rs__check {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--dsw-alias-border-l3, rgb(0 0 0 / .22));
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary-foreground, #fff);
+  transition: background 110ms ease, border-color 110ms ease;
+}
+.dsh-rs__row[data-selected="true"] .dsh-rs__check {
+  background: var(--dsw-alias-button-primary-fill, #111);
+  border-color: var(--dsw-alias-button-primary-fill, #111);
+}
 
 @media (prefers-reduced-motion: reduce) {
   /* 减少动态效果：蓝点定格为常亮，不再闪 */
@@ -967,6 +1230,10 @@ body.dsh-rs-dragging * { cursor: ns-resize !important; }
   .dsh-rs__float { transition: none; }
   .dsh-rs__rows { transition: none; }
   .dsh-rs__rail { transition: none; }
+  .dsh-rs__view { transition: none; }
+  .dsh-rs__num { transition: none; }
+  .dsh-rs__tlabels, .dsh-rs__tsearch, .dsh-rs__tselect, .dsh-rs__tinput, .dsh-rs__tclear, .dsh-rs__tlabel { transition: none; }
+  .dsh-rs__row-actions { transition: none; }
 }
 .dsh-rs__main {
   flex: 1 1 auto;
@@ -1090,6 +1357,50 @@ function writeRemoved(ids: Set<string>): void {
   } catch {
     /* 隐私模式下写不进去，忽略即可 */
   }
+}
+
+function readDeleted(): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(DELETED_KEY)
+    if (!raw) return new Set()
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((id): id is string => typeof id === 'string'))
+  } catch {
+    return new Set()
+  }
+}
+
+function writeDeleted(ids: Set<string>): void {
+  try {
+    window.localStorage.setItem(DELETED_KEY, JSON.stringify([...ids]))
+  } catch {
+    /* ignore */
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  if (bytes < 1024) return `${Math.round(bytes)} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const payload: unknown = await response.json().catch(() => undefined)
+  if (!response.ok) {
+    const message = payload !== null && typeof payload === 'object' && 'error' in payload
+      ? String((payload as { error: unknown }).error)
+      : `HTTP ${response.status}`
+    throw new Error(message)
+  }
+  return payload as T
 }
 
 function readCollapse(fallback: boolean): boolean {
@@ -1527,6 +1838,31 @@ const ICONS: Record<string, Array<Record<string, string | number>>> = {
   ],
   back: [{ d: 'M10 3L5 8L10 13' }],
   chevron: [{ d: 'M6 3.5L10.5 8L6 12.5' }],
+  search: [
+    { d: 'M10.2 10.2L14 14' },
+    { d: 'M7 11.2C9.3 11.2 11.2 9.3 11.2 7C11.2 4.7 9.3 2.8 7 2.8C4.7 2.8 2.8 4.7 2.8 7C2.8 9.3 4.7 11.2 7 11.2Z' },
+  ],
+  listcheck: [
+    { d: 'M2.5 4.5H8' },
+    { d: 'M2.5 9.5H6' },
+    { d: 'M8.8 9.6L10.6 11.4L14 7' },
+  ],
+  trash: [
+    { d: 'M2.5 4.5H13.5' },
+    { d: 'M6 4.5V3.2C6 2.8 6.3 2.5 6.7 2.5H9.3C9.7 2.5 10 2.8 10 3.2V4.5' },
+    { d: 'M4 4.5L4.8 13C4.9 13.6 5.4 14 6 14H10C10.6 14 11.1 13.6 11.2 13L12 4.5' },
+    { d: 'M6.5 7.2V11.4' },
+    { d: 'M9.5 7.2V11.4' },
+  ],
+  checkSquare: [
+    { d: 'M11.5 2H4.5C3.1 2 2 3.1 2 4.5V11.5C2 12.9 3.1 14 4.5 14H11.5C12.9 14 14 12.9 14 11.5V4.5C14 3.1 12.9 2 11.5 2Z' },
+    { d: 'M4.8 8.2L7 10.4L11.2 6.2' },
+  ],
+  xSquare: [
+    { d: 'M11.5 2H4.5C3.1 2 2 3.1 2 4.5V11.5C2 12.9 3.1 14 4.5 14H11.5C12.9 14 14 12.9 14 11.5V4.5C14 3.1 12.9 2 11.5 2Z' },
+    { d: 'M5.5 5.5L10.5 10.5' },
+    { d: 'M10.5 5.5L5.5 10.5' },
+  ],
 }
 
 function sessionIcon(
@@ -1596,6 +1932,18 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
 
     // ── 行操作 / 菜单 / 移除 / 已归档抽屉 ─────────────────────────────
     const [removed, setRemoved] = React.useState<Set<string>>(() => readRemoved())
+    const [deleted, setDeleted] = React.useState<Set<string>>(() => readDeleted())
+    const [selecting, setSelecting] = React.useState(false)
+    const [selected, setSelected] = React.useState<Set<string>>(new Set())
+    const [searchOpen, setSearchOpen] = React.useState(false)
+    const [query, setQuery] = React.useState('')
+    const searchInputRef = React.useRef<HTMLInputElement | null>(null)
+    const [deleteDialog, setDeleteDialog] = React.useState<{
+      targets: Array<{ id: string; title: string; bytes?: number }>
+      totalBytes: number
+      loading: boolean
+    } | null>(null)
+    const [deleteBusy, setDeleteBusy] = React.useState(false)
     const [view, setView] = React.useState<'recent' | 'archive'>('recent')
     const [menu, setMenu] = React.useState<PanelMenu | null>(null)
     const [snack, setSnack] = React.useState<{ text: string; undo?: () => void } | null>(null)
@@ -1612,8 +1960,12 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
     const pullRef = React.useRef(0)
     const pullingRef = React.useRef(false)
 
-    const visibleItems = items.filter((row) => !removed.has(row.id))
-    const archivedItems = rows.getArchived()
+    const visibleItems = items.filter((row) => !removed.has(row.id) && !deleted.has(row.id))
+    const archivedItems = rows.getArchived().filter((row) => !deleted.has(row.id))
+    const archivedQuery = searchOpen ? query.trim().toLowerCase() : ''
+    const archivedVisible = archivedQuery.length === 0
+      ? archivedItems
+      : archivedItems.filter((row) => row.title.toLowerCase().includes(archivedQuery))
 
     // 轨道态（wide === false）：**什么都不留**
     const narrow = props.wide === false
@@ -1649,7 +2001,13 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
         if (event.key !== 'Escape') return
         if (menu) { setMenu(null); return }
         if (rename) { setRename(null); return }
-        if (view === 'archive') { setView('recent'); return }
+        if (deleteDialog) { if (!deleteBusy) setDeleteDialog(null); return }
+        if (view === 'archive') {
+          if (selecting) { cancelSelecting(); return }
+          if (searchOpen) { closeSearch(); return }
+          setView('recent')
+          return
+        }
         if (!collapsed) {
           setCollapsed(true)
           writeCollapse(true)
@@ -1657,7 +2015,7 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
       }
       document.addEventListener('keydown', onKey)
       return () => document.removeEventListener('keydown', onKey)
-    }, [narrow, collapsed, menu, rename, view])
+    }, [narrow, collapsed, menu, rename, view, selecting, searchOpen, deleteDialog, deleteBusy])
 
     /**
      * 展开 / 收回的动画编排（A · 整卡上滑）。
@@ -2070,6 +2428,154 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
       }
     }, [mounted, collapsed, geo?.width, height])
 
+    React.useEffect(() => {
+      if (!searchOpen) return
+      searchInputRef.current?.focus()
+    }, [searchOpen])
+
+    // 离开归档视图就退出选择模式
+    React.useEffect(() => {
+      if (view !== 'archive') {
+        setSelecting(false)
+        setSelected(new Set())
+        setSearchOpen(false)
+        setQuery('')
+        setDeleteDialog(null)
+      }
+    }, [view])
+
+    const archiveBack = (): void => {
+      if (selecting) { cancelSelecting(); return }
+      if (searchOpen) { searchInputRef.current?.blur(); setSearchOpen(false); setQuery(''); return }
+      setView('recent')
+    }
+
+    const startSelecting = (): void => {
+      setSearchOpen(false)
+      setQuery('')
+      setSelecting(true)
+      setSelected(new Set())
+    }
+
+    const startSearch = (): void => {
+      setSelecting(false)
+      setSelected(new Set())
+      setQuery('')
+      setSearchOpen(true)
+    }
+
+    const closeSearch = (): void => {
+      searchInputRef.current?.blur()
+      setSearchOpen(false)
+      setQuery('')
+    }
+
+    const allArchivedSelected = archivedItems.length > 0 && archivedItems.every((row) => selected.has(row.id))
+
+    const toggleAllArchived = (): void => {
+      setSelected(allArchivedSelected ? new Set() : new Set(archivedItems.map((row) => row.id)))
+    }
+
+    const restoreSelected = async (): Promise<void> => {
+      const targets = archivedItems.filter((row) => selected.has(row.id))
+      if (targets.length === 0) return
+      const api = workspacesApi
+      if (!api?.unarchiveSession) { notify('当前宿主不支持恢复归档'); return }
+      let restored = 0
+      for (const row of targets) {
+        try {
+          await api.unarchiveSession(row.id)
+          restored += 1
+        } catch (error) {
+          notify(`恢复「${row.title}」失败：${messageOf(error)}`)
+        }
+      }
+      setSelected(new Set())
+      setSelecting(false)
+      if (restored > 0) notify(`已恢复 ${restored} 个会话`)
+    }
+
+    const cancelSelecting = (): void => {
+      setSelecting(false)
+      setSelected(new Set())
+    }
+
+    const toggleSelected = (id: string): void => {
+      setSelected((previous) => {
+        const next = new Set(previous)
+        if (next.has(id)) next.delete(id)
+        else next.add(id)
+        return next
+      })
+    }
+
+    const openDeleteDialogFor = async (
+      targets: Array<{ id: string; title: string }>,
+    ): Promise<void> => {
+      if (targets.length === 0) return
+      setDeleteDialog({ targets, totalBytes: 0, loading: true })
+      try {
+        const result = await postJson<{
+          sessions: Array<{ id: string; bytes?: number; error?: string }>
+          totalBytes?: number
+        }>(SESSION_INSPECT_URL, { ids: targets.map((target) => target.id) })
+        const sizes = new Map(result.sessions.map((entry) => [entry.id, entry]))
+        const merged = targets.map((target) => ({ ...target, bytes: sizes.get(target.id)?.bytes }))
+        setDeleteDialog({
+          targets: merged,
+          totalBytes: result.totalBytes ?? merged.reduce((sum, target) => sum + (target.bytes ?? 0), 0),
+          loading: false,
+        })
+      } catch (error) {
+        setDeleteDialog({ targets, totalBytes: 0, loading: false })
+        notify(`读取会话大小失败：${messageOf(error)}`)
+      }
+    }
+
+    const openDeleteDialog = async (): Promise<void> => {
+      await openDeleteDialogFor(
+        archivedItems
+          .filter((row) => selected.has(row.id))
+          .map((row) => ({ id: row.id, title: row.title })),
+      )
+    }
+
+    const openDeleteRowDialog = (row: PanelRow): void => {
+      void openDeleteDialogFor([{ id: row.id, title: row.title }])
+    }
+
+    const confirmDelete = async (): Promise<void> => {
+      if (!deleteDialog || deleteDialog.loading || deleteBusy) return
+      const ids = deleteDialog.targets.map((target) => target.id)
+      setDeleteBusy(true)
+      try {
+        const result = await postJson<{
+          deleted: Array<{ id: string; bytes: number }>
+          failed: Array<{ id: string; error: string }>
+          totalBytes?: number
+        }>(SESSION_DELETE_URL, { ids })
+        const freed = result.deleted.reduce((sum, entry) => sum + entry.bytes, 0)
+        setDeleted((previous) => {
+          const next = new Set(previous)
+          for (const entry of result.deleted) next.add(entry.id)
+          writeDeleted(next)
+          return next
+        })
+        setDeleteDialog(null)
+        setSelecting(false)
+        setSelected(new Set())
+        const failed = result.failed.length
+        notify(
+          `已删除 ${result.deleted.length} 个会话${freed > 0 ? `，释放 ${formatBytes(freed)}` : ''}` +
+          `${failed > 0 ? `；${failed} 个失败` : ''}。附件未动，可运行 prune-attachments 查看可清理附件。`,
+        )
+      } catch (error) {
+        notify(`删除失败：${messageOf(error)}`)
+      } finally {
+        setDeleteBusy(false)
+      }
+    }
+
     const currentHeight = Math.min(height ?? DEFAULT_HEIGHT, geo?.maxHeight ?? DEFAULT_HEIGHT)
     /** 这一趟滑动的时长（按高度算）—— 卡片过渡、裁切 keyframes、卸载等待共用同一个值 */
     const timing = slideTiming(currentHeight)
@@ -2193,7 +2699,161 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
       writeHeight(null)
     }
 
-    const trigger = h(
+    const archiveMode: 'normal' | 'search' | 'select' = selecting ? 'select' : searchOpen ? 'search' : 'normal'
+
+    const archiveTitlebar = h(
+      'div',
+      {
+        ref: triggerRef,
+        className: 'dsh-rs__titlebar',
+        'data-mode': archiveMode,
+        role: 'group',
+        'aria-label': '已归档会话',
+      },
+      h(
+        'button',
+        {
+          className: 'dsh-rs__tback',
+          type: 'button',
+          title: selecting ? '退出选择' : searchOpen ? '退出搜索' : '返回最近会话',
+          'aria-label': selecting ? '退出选择' : searchOpen ? '退出搜索' : '返回最近会话',
+          onClick: archiveBack,
+        },
+        sessionIcon(h, 'back', 11),
+      ),
+      h(
+        'span',
+        { ref: triggerLabelRef, className: 'dsh-rs__tlabels' },
+        h(
+          'span',
+          {
+            className: 'dsh-rs__tlabel dsh-rs__tlabel--normal',
+            'aria-hidden': archiveMode === 'select' ? 'true' : undefined,
+          },
+          '已归档',
+          h('b', null, String(archivedItems.length)),
+        ),
+        h(
+          'span',
+          {
+            className: 'dsh-rs__tlabel dsh-rs__tlabel--select',
+            'aria-hidden': archiveMode === 'select' ? undefined : 'true',
+          },
+          '已选',
+          h('b', null, String(selected.size)),
+        ),
+      ),
+      h(
+        'div',
+        { className: 'dsh-rs__tact' },
+        h(
+          'div',
+          { className: 'dsh-rs__tsearch' },
+          h(
+            'button',
+            {
+              className: 'dsh-rs__tbtn',
+              type: 'button',
+              title: '搜索',
+              'aria-label': '搜索',
+              tabIndex: archiveMode === 'normal' ? 0 : -1,
+              onClick: startSearch,
+            },
+            sessionIcon(h, 'search', 14),
+          ),
+          h('input', {
+            ref: searchInputRef,
+            className: 'dsh-rs__tinput',
+            type: 'text',
+            placeholder: '搜索已归档…',
+            value: query,
+            tabIndex: searchOpen ? 0 : -1,
+            onChange: (event: React.ChangeEvent<HTMLInputElement>) => setQuery(event.target.value),
+            'aria-label': '搜索已归档',
+            spellCheck: false,
+          }),
+          h(
+            'button',
+            {
+              className: 'dsh-rs__tbtn dsh-rs__tclear',
+              type: 'button',
+              title: '清除搜索',
+              'aria-label': '清除搜索',
+              tabIndex: searchOpen ? 0 : -1,
+              onClick: closeSearch,
+            },
+            sessionIcon(h, 'close', 14),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'dsh-rs__tselect' },
+          h(
+            'button',
+            {
+              className: 'dsh-rs__tbtn',
+              type: 'button',
+              title: selecting ? (allArchivedSelected ? '取消选择' : '全选') : '选择',
+              'aria-label': selecting ? (allArchivedSelected ? '取消选择' : '全选') : '选择会话',
+              tabIndex: searchOpen ? -1 : 0,
+              disabled: selecting && archivedItems.length === 0,
+              onClick: () => {
+                if (selecting) {
+                  toggleAllArchived()
+                } else {
+                  startSelecting()
+                }
+              },
+            },
+            sessionIcon(
+              h,
+              selecting ? (allArchivedSelected ? 'xSquare' : 'checkSquare') : 'listcheck',
+              14,
+            ),
+          ),
+          h(
+            'button',
+            {
+              className: 'dsh-rs__tbtn',
+              type: 'button',
+              title: '恢复选中',
+              'aria-label': '恢复选中',
+              tabIndex: selecting && selected.size > 0 ? 0 : -1,
+              disabled: !selecting || selected.size === 0,
+              onClick: () => { void restoreSelected() },
+            },
+            sessionIcon(h, 'restore', 14),
+          ),
+          h(
+            'button',
+            {
+              className: 'dsh-rs__tbtn dsh-rs__tbtn--danger',
+              type: 'button',
+              title: '删除选中',
+              'aria-label': '删除选中',
+              tabIndex: selecting && selected.size > 0 ? 0 : -1,
+              disabled: !selecting || selected.size === 0,
+              onClick: () => { void openDeleteDialog() },
+            },
+            sessionIcon(h, 'trash', 14),
+          ),
+          h(
+            'button',
+            {
+              className: 'dsh-rs__tbtn',
+              type: 'button',
+              title: '退出选择',
+              'aria-label': '退出选择',
+              tabIndex: selecting ? 0 : -1,
+              onClick: cancelSelecting,
+            },
+            sessionIcon(h, 'close', 14),
+          ),
+        ),
+      ),
+    )
+
+    const trigger = view === 'archive' ? archiveTitlebar : h(
       'button',
       {
         ref: triggerRef,
@@ -2201,18 +2861,12 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
         className: 'dsh-rs__trigger',
         'aria-expanded': collapsed ? 'false' : 'true',
         'aria-controls': 'dsh-rs-float',
-        'data-mode': view === 'archive' ? 'archive' : undefined,
-        title: view === 'archive' ? '返回最近会话' : collapsed ? '展开最近会话' : '收起最近会话',
-        onClick: () => {
-          if (view === 'archive') {
-            setView('recent')
-            return
-          }
-          setCollapsed((previous) => {
-            writeCollapse(!previous)
-            return !previous
-          })
-        },
+        'aria-label': collapsed ? '展开最近会话' : '收起最近会话',
+        title: collapsed ? '展开最近会话' : '收起最近会话',
+        onClick: () => setCollapsed((previous) => {
+          writeCollapse(!previous)
+          return !previous
+        }),
       },
       h(
         'svg',
@@ -2230,15 +2884,11 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
         },
         h('path', { d: 'm9 6 6 6-6 6' }),
       ),
-      h(
-        'span',
-        { ref: triggerLabelRef, className: 'dsh-rs__label' },
-        view === 'archive' ? '已归档' : '最近会话',
-      ),
+      h('span', { ref: triggerLabelRef, className: 'dsh-rs__label' }, '最近会话'),
       h(
         'span',
         { className: 'dsh-rs__count' },
-        String(view === 'archive' ? archivedItems.length : visibleItems.length),
+        h('span', { className: 'dsh-rs__num dsh-rs__num--recent' }, String(visibleItems.length)),
       ),
     )
 
@@ -2332,63 +2982,135 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
       ),
     )
 
-    const renderArchivedRow = (row: PanelRow): React.ReactElement => h(
-      'div',
-      { key: row.id, className: 'dsh-rs__row', role: 'listitem', 'data-session-id': row.id },
-      h(
-        'span',
-        { className: 'dsh-rs__go' },
-        statusIndicator(h, row.state, row.stateLabel),
+    const renderArchivedRow = (row: PanelRow): React.ReactElement => {
+      const checked = selected.has(row.id)
+      return h(
+        'div',
+        {
+          key: row.id,
+          className: 'dsh-rs__row',
+          role: 'listitem',
+          'data-session-id': row.id,
+          'data-selecting': selecting ? 'true' : undefined,
+          'data-selected': checked ? 'true' : undefined,
+          'aria-selected': selecting ? (checked ? 'true' : 'false') : undefined,
+          onClick: selecting ? () => toggleSelected(row.id) : undefined,
+        },
+        selecting
+          ? h(
+              'span',
+              { className: 'dsh-rs__check', 'aria-hidden': 'true' },
+              checked
+                ? h(
+                    'svg',
+                    {
+                      width: 10,
+                      height: 10,
+                      viewBox: '0 0 12 12',
+                      fill: 'none',
+                      stroke: 'currentColor',
+                      strokeWidth: 2,
+                      strokeLinecap: 'round',
+                      strokeLinejoin: 'round',
+                    },
+                    h('path', { d: 'M2.5 6.5L5 9L9.5 3.5' }),
+                  )
+                : null,
+            )
+          : null,
         h(
           'span',
-          { className: 'dsh-rs__main' },
-          h('span', { className: 'dsh-rs__name' }, row.title),
-          h('span', { className: 'dsh-rs__meta' }, row.meta),
+          { className: 'dsh-rs__go' },
+          selecting ? null : statusIndicator(h, row.state, row.stateLabel),
+          h(
+            'span',
+            { className: 'dsh-rs__main' },
+            h('span', { className: 'dsh-rs__name' }, row.title),
+            h('span', { className: 'dsh-rs__meta' }, row.meta),
+          ),
         ),
-      ),
-      h(
-        'button',
-        {
-          className: 'dsh-rs__restore',
-          type: 'button',
-          'aria-label': `恢复「${row.title}」`,
-          onClick: () => { void restoreRow(row) },
-        },
-        sessionIcon(h, 'restore', 12),
-        h('span', null, '恢复'),
-      ),
-    )
+        selecting
+          ? null
+          : h(
+              'span',
+              { className: 'dsh-rs__row-actions' },
+              h(
+                'button',
+                {
+                  className: 'dsh-rs__row-act',
+                  type: 'button',
+                  title: '恢复',
+                  'aria-label': `恢复「${row.title}」`,
+                  onClick: () => { void restoreRow(row) },
+                },
+                sessionIcon(h, 'restore', 14),
+              ),
+              h(
+                'button',
+                {
+                  className: 'dsh-rs__row-act dsh-rs__row-act--danger',
+                  type: 'button',
+                  title: '删除',
+                  'aria-label': `删除「${row.title}」`,
+                  onClick: () => openDeleteRowDialog(row),
+                },
+                sessionIcon(h, 'trash', 14),
+              ),
+            ),
+      )
+    }
 
-    const recentList = h(
-      'div',
+    // 两个视图并排渲染，进入/退出靠整页横移（push）：最近会话 ←→ 归档。
+    // 两页都不需要不透明底，横移时也不会互相透字 —— 这是透明浮层下最稳的做法。
+    const recentView = h(
+      'section',
       {
-        className: 'dsh-rs__list',
-        role: 'list',
-        ref: listRef,
-        'data-rail': railOpen ? 'true' : undefined,
+        className: 'dsh-rs__view dsh-rs__view--recent',
+        'aria-hidden': view === 'archive' ? 'true' : undefined,
+        inert: view === 'archive' ? '' : undefined,
       },
-      visibleItems.length === 0
-        ? h('div', { className: 'dsh-rs__empty' }, '还没有历史会话')
-        : h('div', { className: 'dsh-rs__rows' }, visibleItems.map(renderRecentRow)),
+      h(
+        'div',
+        {
+          className: 'dsh-rs__list',
+          role: 'list',
+          ref: listRef,
+          'data-rail': railOpen ? 'true' : undefined,
+        },
+        visibleItems.length === 0
+          ? h('div', { className: 'dsh-rs__empty' }, '还没有历史会话')
+          : h('div', { className: 'dsh-rs__rows' }, visibleItems.map(renderRecentRow)),
+      ),
     )
 
     const archiveView = h(
-      React.Fragment,
-      null,
+      'section',
+      {
+        className: 'dsh-rs__view dsh-rs__view--archive',
+        'aria-hidden': view === 'recent' ? 'true' : undefined,
+        inert: view === 'recent' ? '' : undefined,
+      },
       h(
         'div',
         { className: 'dsh-rs__list', role: 'list' },
-        archivedItems.length === 0
-          ? h('div', { className: 'dsh-rs__empty' }, '还没有归档的会话')
-          : archivedItems.map(renderArchivedRow),
+        archivedVisible.length === 0
+          ? h('div', { className: 'dsh-rs__empty' }, searchOpen ? '没有匹配的会话' : '还没有归档的会话')
+          : archivedVisible.map(renderArchivedRow),
       ),
+    )
+
+    const views = h(
+      'div',
+      { className: 'dsh-rs__views', 'data-view': view },
+      recentView,
+      archiveView,
     )
 
     const railElement = h(
       'div',
       {
         className: 'dsh-rs__railclip',
-        hidden: archivedItems.length === 0 || view === 'archive',
+        hidden: archivedItems.length === 0,
       },
       h(
         'button',
@@ -2571,6 +3293,76 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
         )
       : null
 
+    const deleteElement = deleteDialog
+      ? createPortal(
+          h(
+            'div',
+            { className: 'dsh-rs__modal' },
+            h('div', {
+              className: 'dsh-rs__modal-scrim',
+              onClick: () => { if (!deleteBusy) setDeleteDialog(null) },
+            }),
+            h(
+              'div',
+              {
+                className: 'dsh-rs__modal-card dsh-rs__modal-card--delete',
+                role: 'dialog',
+                'aria-modal': 'true',
+                'aria-label': '删除已归档会话',
+              },
+              h('h2', { className: 'dsh-rs__modal-title' }, `删除 ${deleteDialog.targets.length} 个已归档会话？`),
+              h('p', { className: 'dsh-rs__modal-desc' }, '只删除会话日志，附件库不动；删除后不可恢复。'),
+              h(
+                'div',
+                { className: 'dsh-rs__delete-list' },
+                deleteDialog.targets.map((target) => h(
+                  'div',
+                  { key: target.id, className: 'dsh-rs__delete-item' },
+                  h('span', { className: 'dsh-rs__delete-name' }, target.title),
+                  h(
+                    'span',
+                    { className: 'dsh-rs__delete-size' },
+                    target.bytes !== undefined
+                      ? formatBytes(target.bytes)
+                      : deleteDialog.loading ? '检查中…' : '—',
+                  ),
+                )),
+              ),
+              h(
+                'div',
+                { className: 'dsh-rs__delete-total' },
+                deleteDialog.loading ? '正在读取占用…' : `共 ${formatBytes(deleteDialog.totalBytes)}`,
+              ),
+              h(
+                'div',
+                { className: 'dsh-rs__modal-actions' },
+                h(
+                  'button',
+                  {
+                    className: 'dsh-rs__btn dsh-rs__btn--ghost',
+                    type: 'button',
+                    disabled: deleteBusy,
+                    onClick: () => setDeleteDialog(null),
+                  },
+                  '取消',
+                ),
+                h(
+                  'button',
+                  {
+                    className: 'dsh-rs__btn dsh-rs__btn--danger',
+                    type: 'button',
+                    disabled: deleteDialog.loading || deleteBusy,
+                    onClick: () => { void confirmDelete() },
+                  },
+                  deleteBusy ? '删除中…' : '删除',
+                ),
+              ),
+            ),
+          ),
+          document.body,
+        )
+      : null
+
     // 浮层：portal 到 body —— 外层 .dsh-rs__float-clip 负责坐标与裁切，
     // 内层 .dsh-rs__float 只负责"整卡上滑"（translateY(100%) → 0）。
     const float = !mounted || !geo
@@ -2622,7 +3414,7 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
               onDoubleClick: onGripReset,
               onKeyDown: onGripKey,
             }),
-            view === 'archive' ? archiveView : recentList,
+            views,
             railElement,
             snackElement,
           ),
@@ -2630,7 +3422,7 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
         document.body,
       )
 
-    return h(React.Fragment, null, trigger, float, menuElement, renameElement)
+    return h(React.Fragment, null, trigger, float, menuElement, renameElement, deleteElement)
 
   }
 }
