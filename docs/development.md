@@ -212,6 +212,78 @@ absolute`，这里从竖直改成水平：`ns-resize` + 上下各 4px）。
   （CSS 一行：`.dsh-rs__trigger[aria-expanded="true"] .dsh-rs__caret { rotate: -90deg }`，
   想要"官方惯例"的展开朝下就把它改成 `90deg`）。
 
+## 跟随侧栏：改用 CSS 锚点定位
+
+**症状**：拖侧栏宽度时，浮层边缘慢半拍；交界处每帧闪一条缝。
+
+**原因**：浮层挂到 `body` + `position:fixed`，宽度靠 `ResizeObserver` 量完再写回去。
+RO 回调在本帧**排版之后**才触发，`setState` 又要等**绘制之后**才落地 —— 浮层最早下一帧
+才用上新宽度；`Math.round(left)` 与 `Math.round(width)` 各自取整，还会让左右各差 1px。
+
+**改法**：把「宽度从哪来」交回布局本身（图解见本节末尾）。
+
+| 谁 | 做什么 |
+| --- | --- |
+| 侧栏列 | 运行时写一条内联 `anchor-name: --dsh-rs-col`（`ensureColumnAnchor`，只写一次，不是每帧） |
+| 入口行 | CSS 里直接 `anchor-name: --dsh-rs-trigger`（`.dsh-rs__trigger` / `.dsh-rs__titlebar`，零 JS） |
+| 浮层 | `left: anchor(--dsh-rs-col left)` + `width: anchor-size(--dsh-rs-col width)` + `top: anchor(--dsh-rs-trigger top)` + `translate: 0 -100%` |
+
+浏览器排版时解析 → 和侧栏**同一次布局、同一帧绘制**：没有测量、没有 React 往返、没有取整误差。
+
+**回退**：`ANCHOR_SUPPORTED` 用 `CSS.supports` 探测三项（`anchor-name` / `anchor()` / `anchor-size()`），
+不支持时继续走老的「量坐标」路径（照旧写内联 `left/width/bottom`），行为完全不变。
+CSS 侧还有一层 `@supports` 保底：只有 `[data-anchor="true"]` 的元素才会命中锚点规则。
+
+### 自检 + 自动降级（为什么必须有）
+
+锚点是**静默失败**的：列上没有 `anchor-name`、名字被占、或宿主把列节点换成了新的，
+`anchor()` 都会退化成 `auto` —— 元素跑到静态位置、宽度按内容收缩，**不报错、不 throw**。
+`CSS.supports` 只能回答「浏览器会不会」，回答不了「这次到底对上没有」。
+
+所以浮层每次展开后做一次实测对账（`anchorDrift`，布局阶段跑）：
+
+| 检查项 | 正常值 | 失效时的典型值（实测） |
+| --- | --- | --- |
+| 左边 = 列左边 | 0 | 0（列在 x=0 时看不出来） |
+| 宽度 = 列宽 | 0 | **-300**（收缩成内容宽） |
+| 底边 = 入口行顶边 | 0 | 0（入口锚点还活着时） |
+
+任一项 > 1px → 隔一帧复核 → 仍然不对就 `setAnchored(false)` **永久降级**成量坐标
+（本页面会话内不再尝试），同时摘掉列上的 `anchor-name`、并**同步**重量一次几何，
+避免降级那一帧用旧坐标跳一下。
+
+### 一个被顺手理清的隐含依赖
+
+`--dsh-rs-align`（列表行左内边距对齐入口标题）的 effect 原来依赖 `geo?.width`。
+锚点模式下 `geo` 不再随列宽变化，这个依赖就永远不触发了。经核对：它量的是
+「入口标题相对浮层左边缘的偏移」，两者都跟着列走，**与列宽无关** —— 所以把依赖
+去掉了，并就地写了注释说明为什么可以去掉。
+
+**顺带的好处**：`sameGeometry()` 在锚点模式下把横向字段排除在比较之外 —— 拉侧栏时
+`ResizeObserver` 仍然每帧回调，但判等后不再 `setState`，整段拖拽**一次都不重渲染**。
+
+**怎么验**：拖侧栏时浮层左右边缘应与侧栏边缘完全重合（放大到 400% 也不该有 1px 缝）；
+DevTools 选中 `.dsh-rs__float-clip` → Computed → `left/width` 显示的是 `anchor()` 解析后的
+像素值，随侧栏同步变化。
+
+> 依据：Chromium 125+ 起 `anchor-name` / `anchor()` / `anchor-size()` 全部可用（桌面端就是
+> Chromium 内核）；Safari 26 起支持，Firefox 仍在推进 —— 所以探测 + 回退是必需的，不是可选的。
+
+### 图解
+
+- **它到底在哪**：浮层挂在页面最外层，不在侧栏里 —— `images/explain-where.png`
+- **为什么慢半拍**：量一次、存一次、排队、下一帧才画 —— `images/explain-lag.png`
+- **入口能跟随、浮层不能**：布局给的宽度 vs 自己量的宽度（含三条原生路线）—— `images/explain-native.png`
+- **为什么闪**：两块边界差一点点，中间漏一条缝 —— `images/explain-flicker.png`
+
+![它到底在哪](images/explain-where.png)
+
+![为什么慢半拍](images/explain-lag.png)
+
+![入口能跟随、浮层不能](images/explain-native.png)
+
+![为什么闪](images/explain-flicker.png)
+
 ## 配置
 
 改 profile 的 `cordis.patch.yml` 里同 `id: recent-sessions` 行：
@@ -241,7 +313,19 @@ dsh plugin --profile desktop add @yfwu2020/dsh-recent-sessions   # 生产：重�
 或运行时注入 / 热重载：对 AI 说 `dev_inject_plugin {"dir": "<本目录>"}` /
 `dev_reload_package {"packageName": "dsh-recent-sessions"}`。
 
-改完 client 需要**刷新一次 GUI 窗口**（客户端 bundle 不走 dev:web 热更新）。
+改完 client **不需要刷新 GUI 窗口**（桌面版 0.2.1 起实测如此）。
+
+链路是这样的：`dsh-client-hmr` 常驻在 Web/桌面组合里，每 `pollIntervalMs`（默认 **500ms**）
+stat 一次各插件入口产物的 `mtime/ctime/size`，一变就给 `clientModules.rebuilt(id)`，
+经 `/plugins/events`（SSE）推一个 `rebuilt` 帧；浏览器侧作废旧模块、预取新脚本、
+拆掉旧 fiber、清掉本插件拥有的 `<style>`，再用新产物重新挂载。
+
+代价与失败策略：
+
+- **插件内的 React 状态会重置**（面板会重新滑入一次）；会话 / 工作区 / 连接状态不受影响。
+- 热替换**不回滚**：旧 fiber 拆掉之后如果 import 或激活失败，不会恢复上一版，
+  失败会显示为页面内的同步错误 —— 去 `设置 → 插件 → 插件列表` 点重试即可。
+- 只是「内容变了」才会触发：`mtime/ctime/size` 都不变就不会重建（不会凭空刷新）。
 
 ## 排错
 
@@ -249,6 +333,7 @@ dsh plugin --profile desktop add @yfwu2020/dsh-recent-sessions   # 生产：重�
 - 展开后浮层不出现 → 看 `geometry` 是不是 `null`：`null` 表示量不到侧栏
   （`[class*="_sidebarCol"]` 宽度 < 80，比如侧栏正收起），或入口此时不可见
 - 浮层位置不对 → 外壳侧栏列类名变了，改 `SIDEBAR_SEL` 的子串
+- 浮层跑到左上角 / 不跟侧栏走 → 锚点没生效：看侧栏列元素上有没有内联 `anchor-name`（`ensureColumnAnchor` 写的那条），再确认 `CSS.supports("anchor-name: --x")` 为 true；否则它会自动退回「量坐标」路径
 - `slots.register` 报 `slot "sidebar.footer.action" is not declared`
   → 侧栏外壳版本变了，用当前版本 `lib/client.js` 里声明的席位名替换
 - 配色不对 → 面板只用 `--dsw-*` token，检查主题是否注入了这些变量
