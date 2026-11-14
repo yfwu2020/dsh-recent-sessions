@@ -131,6 +131,8 @@ interface PanelRow {
   id: string
   title: string
   meta: string
+  /** 会话的最后活动时刻（毫秒，与排序键同源）：判断「移除之后又动过没有」要用它。 */
+  updatedAt: number
   running: boolean
   current: boolean
   /** 主状态：与官方会话行前面那枚标识同一套语义。 */
@@ -1411,24 +1413,49 @@ function workspaceNames(items: WorkspaceItem[] | undefined): Map<string, string>
   return map
 }
 
-function readRemoved(): Set<string> {
+/**
+ * 「从最近会话移除」的本地压条：`id → 移除时刻`（毫秒）。
+ *
+ * 移除只是**压住**，不是永久隐身：会话一旦有了新活动（`updatedAt` 晚于移除时刻），
+ * 就自动回到列表。理由很直接 —— 这份列表的全部意义就是"最近活动的会话"，把一条
+ * 还在用的会话永久藏掉，等于让人以为它丢了（0.3.2 之前的纯 id 数组就是这样：撤销条
+ * 一闪而过，之后再也没有找回的入口）。
+ *
+ * 老格式是 `string[]`（只知道移除了、不知道什么时候移除）—— 读到数组时一次性放回列表
+ * 并就地迁成新格式，不留隐身幽灵。
+ */
+function readRemoved(): Map<string, number> {
   try {
     const raw = window.localStorage.getItem(REMOVED_KEY)
-    if (!raw) return new Set()
+    if (!raw) return new Map()
     const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return new Set()
-    return new Set(parsed.filter((id): id is string => typeof id === 'string'))
+    if (Array.isArray(parsed)) {
+      writeRemoved(new Map())
+      return new Map()
+    }
+    if (typeof parsed !== 'object' || parsed === null) return new Map()
+    const map = new Map<string, number>()
+    for (const [id, at] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof at === 'number' && Number.isFinite(at) && at > 0) map.set(id, at)
+    }
+    return map
   } catch {
-    return new Set()
+    return new Map()
   }
 }
 
-function writeRemoved(ids: Set<string>): void {
+function writeRemoved(removed: Map<string, number>): void {
   try {
-    window.localStorage.setItem(REMOVED_KEY, JSON.stringify([...ids]))
+    window.localStorage.setItem(REMOVED_KEY, JSON.stringify(Object.fromEntries(removed)))
   } catch {
     /* 隐私模式下写不进去，忽略即可 */
   }
+}
+
+/** 这条压条现在还算不算数：只有"移除之后一直没有新活动"才继续失望地隐身。 */
+function heldByRemoval(removedAt: number | undefined, updatedAt: number | undefined): boolean {
+  if (removedAt === undefined) return false
+  return (updatedAt ?? 0) <= removedAt
 }
 
 function readDeleted(): Set<string> {
@@ -1873,7 +1900,17 @@ function createRowsStore(ctx: ClientContext, config: PanelConfig) {
           stateLabel = '已完成'
         }
 
-        return { id, title, meta, running, current: id === currentId, state, stateLabel, pinned: pinned.has(id) }
+        return {
+          id,
+          title,
+          meta,
+          updatedAt: summary.updatedAt ?? 0,
+          running,
+          current: id === currentId,
+          state,
+          stateLabel,
+          pinned: pinned.has(id),
+        }
       })
 
     cache = rows.filter((row) => !archived.has(row.id)).slice(0, config.maxItems)
@@ -2094,7 +2131,7 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
     const dragRef = React.useRef<{ startY: number; startHeight: number; max: number } | null>(null)
 
     // ── 行操作 / 菜单 / 移除 / 已归档抽屉 ─────────────────────────────
-    const [removed, setRemoved] = React.useState<Set<string>>(() => readRemoved())
+    const [removed, setRemoved] = React.useState<Map<string, number>>(() => readRemoved())
     const [deleted, setDeleted] = React.useState<Set<string>>(() => readDeleted())
     const [selecting, setSelecting] = React.useState(false)
     const [selected, setSelected] = React.useState<Set<string>>(new Set())
@@ -2123,12 +2160,29 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
     const pullRef = React.useRef(0)
     const pullingRef = React.useRef(false)
 
-    const visibleItems = items.filter((row) => !removed.has(row.id) && !deleted.has(row.id))
+    const visibleItems = items.filter(
+      (row) => !deleted.has(row.id) && !heldByRemoval(removed.get(row.id), row.updatedAt),
+    )
     const archivedItems = rows.getArchived().filter((row) => !deleted.has(row.id))
     const archivedQuery = searchOpen ? query.trim().toLowerCase() : ''
     const archivedVisible = archivedQuery.length === 0
       ? archivedItems
       : archivedItems.filter((row) => row.title.toLowerCase().includes(archivedQuery))
+
+    // 压条过期即清：会话又有活动了，存储里那条记录就不该再待着（不然它会一直
+    // 跟着列表走，将来某天再把自己盖回去）。只清看得见的行，够用且不瞎猜。
+    React.useEffect(() => {
+      if (removed.size === 0) return
+      let stale = false
+      const next = new Map(removed)
+      for (const row of items) {
+        if (heldByRemoval(next.get(row.id), row.updatedAt)) continue
+        if (next.delete(row.id)) stale = true
+      }
+      if (!stale) return
+      writeRemoved(next)
+      setRemoved(next)
+    }, [items, removed])
 
     // 轨道态（wide === false）：**什么都不留**
     const narrow = props.wide === false
@@ -2631,15 +2685,22 @@ function createPanel(ctx: ClientContext, config: PanelConfig) {
 
     const removeRow = (row: PanelRow): void => {
       setMenu(null)
-      const next = new Set(removed)
-      next.add(row.id)
-      writeRemoved(next)
-      setRemoved(next)
-      notify(`已从最近会话列表移除「${row.title}」`, () => {
-        const back = new Set(removed)
-        back.delete(row.id)
-        writeRemoved(back)
-        setRemoved(back)
+      // 压条记的是"移除时刻"：会话之后再动，就由 heldByRemoval 自动放回列表
+      const at = Date.now()
+      setRemoved((current) => {
+        const next = new Map(current)
+        next.set(row.id, at)
+        writeRemoved(next)
+        return next
+      })
+      notify(`已从列表移除「${row.title}」，有新活动会自动回来`, () => {
+        setRemoved((current) => {
+          if (!current.has(row.id)) return current
+          const next = new Map(current)
+          next.delete(row.id)
+          writeRemoved(next)
+          return next
+        })
       })
     }
 
